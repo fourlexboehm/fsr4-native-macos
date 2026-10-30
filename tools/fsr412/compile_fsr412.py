@@ -14,6 +14,7 @@ import argparse, fcntl, hashlib, json, os, re, shutil, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fsr412.optimization import REVISION, input_color_cache, color_cache_source, pixelization_fix, float_int8_dots
+from fsr412.fused_post import fused_post_source
 
 ROOT = Path(__file__).resolve().parents[2]
 CATALOG = ROOT / "tools" / "fsr412" / "shader_catalog.json"
@@ -210,11 +211,16 @@ def main():
     ap.add_argument("--auto-exposure",type=int,choices=(0,1),default=0); ap.add_argument("--optimize",type=int,choices=(0,1),default=0)
     ap.add_argument("--ultra-performance",type=int,choices=(0,1),default=0); ap.add_argument("--external-post-cnb",type=int,choices=(0,1),default=0)
     ap.add_argument("--pixelization-fix",type=int,choices=(0,1),default=0)
+    ap.add_argument("--fused-simd-post",type=int,choices=(0,1),default=0)
     a=ap.parse_args(); root=Path(a.root).resolve(); bdir=Path(a.builddir).resolve()
     prepared=bool(a.optimize and a.external_post_cnb and a.colorspace==0)
     key=f"fsr412_{a.res}_di{a.depth_inverted}_lm{a.low_res_mv}_jm{a.jittered_mv}_cs{a.colorspace}_ae{a.auto_exposure}_o{a.optimize}_up{a.ultra_performance}_pc{a.external_post_cnb}"
     if prepared: key+=f"_v{REVISION}"
     if a.pixelization_fix: key+="_px2"
+    if a.fused_simd_post:
+        if not prepared or a.ultra_performance or a.pixelization_fix:
+            raise ValueError('SIMD POST fusion requires optimized linear normal Lite')
+        key+="_simdfused1"
     out=Path(a.outdir).resolve() if a.outdir else bdir/key; out.mkdir(parents=True,exist_ok=True)
     lock=(out/".compile.lock").open("a")
     fcntl.flock(lock,fcntl.LOCK_EX)
@@ -224,7 +230,8 @@ def main():
     selected={stage:pick(rows,stage,a.res,opts) for stage in order}
     support_dir,support_manifest=support_bundle(root,bdir,a.colorspace,a.auto_exposure)
     digest=hashlib.sha256(json.dumps(vars(a),sort_keys=True).encode())
-    for path in [Path(__file__),Path(__file__).with_name("optimization.py"),CATALOG,
+    for path in [Path(__file__),Path(__file__).with_name("optimization.py"),Path(__file__).with_name("fused_post.py"),
+                 root/"src/fsr411_simd.metal",root/"src/fsr411_model.h",CATALOG,
                  *[source_for(row) for row in selected.values()],
                  *[support_dir/support_manifest["kernels"][s]["library"] for s in ("ae","ae_finalize","rcas")]]:
         digest.update(path.read_bytes())
@@ -244,6 +251,12 @@ def main():
         src=source_for(row); base=out/stage
         generated,lib=compile_metal(src,base,row["entry"],stage=="post" and bool(a.external_post_cnb),a.res,prepared,stage,bool(a.pixelization_fix))
         entry="fsr412_"+row["entry"]
+        if stage=="post" and a.fused_simd_post:
+            generated.write_text(fused_post_source(generated.read_text(),
+                (root/"src/fsr411_simd.metal").read_text(), (root/"src/fsr411_model.h").read_text()))
+            run(["xcrun","metal","-std=macos-metal2.3","-O3","-c",generated,"-o",base.with_suffix(".air")])
+            run(["xcrun","metallib",base.with_suffix(".air"),"-o",lib])
+            entry="fsr412_simd_fused_post"
         bufs,tex,sam=reflect_bindings(generated.read_text(),entry)
         info={"stage":stage,"entry":entry,"library":lib.name,"wgsize":row.get("wgsize",[256,1,1]),"buffers":bufs,"textures":tex,"samplers":sam,"source_sha256":row["sha256"]}
         if stage in tensor_slot:
@@ -267,6 +280,8 @@ def main():
     init=root/"build/fsr412_model"/("initializers-lite-ultraperformance.bin" if a.ultra_performance else "initializers-lite.bin")
     manifest={"version":"4.1.2","model":"int8-lite","key":key,"source_hash":fingerprint,"optimization_revision":REVISION,
         "prepared_color":prepared,"pixelization_fix":bool(a.pixelization_fix),"order":order,"kernels":kernels,"scratch_bytes":scratch,"initializer":str(init.resolve()),"external_post_cnb":bool(a.external_post_cnb),"post_pixels_per_group":32,"geometry":{"pre":{"kind":"pre","tile":[16,16],"threads":[256,1,1]},"post":{"kind":"post","tile":[16,16],"threads":[256,1,1]}}}
+    manifest["fused_simd_post"]=bool(a.fused_simd_post)
+    if a.fused_simd_post: kernels["post"]["wgsize"]=[128,1,1]
     temporary=out/f".bindings.{os.getpid()}.json"
     temporary.write_text(json.dumps(manifest,indent=2)+"\n")
     temporary.replace(manifest_path)

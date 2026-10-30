@@ -9,6 +9,11 @@ BINDIR   := tools/bin
 
 all: $(BINDIR)/fsr4mac $(BINDIR)/gen_testcase $(BINDIR)/compare $(BINDIR)/bilin $(BINDIR)/bin2png
 
+# Opt-in research test, not part of the release GPU suite until parity passes.
+build/tests/fsr412_fused_post_test: tests/fsr412_fused_post_test.mm tests/fsr412_optimization_test.mm src/fsr412_runtime.h src/fsr411_runtime.h src/fsr412_session.inc Makefile
+	mkdir -p build/tests
+	$(CXX) $(CXXFLAGS) -Wextra -Werror -fobjc-arc -isysroot $(SDKROOT) $< $(FRAMEWORKS) -o $@
+
 build/tests/fsr412_padding_test: tests/fsr412_padding_test.mm tests/fsr412_optimization_test.mm src/fsr412_runtime.h src/fsr411_runtime.h src/fsr412_session.inc Makefile
 	mkdir -p build/tests
 	$(CXX) $(CXXFLAGS) -Wextra -Werror -fobjc-arc -isysroot $(SDKROOT) $< $(FRAMEWORKS) -o $@

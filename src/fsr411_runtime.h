@@ -79,6 +79,7 @@ struct Options {
     bool rcas = false, allowCompile = true, ultraPerformance = false;
     // FSR 4.1.2 only: widen POST's current-frame filter where history is rejected.
     bool pixelFix = false;
+    bool fusedSimdPost = false; // opt-in experimental Lite CNB + temporal resolve
     // SIMD load_window zeroes every out-of-bounds texel, including DS/CT halos.
     // Keep explicit padding for reference/MPP and diagnostic scratch captures.
     bool skipSimdPadding = true;
@@ -233,6 +234,7 @@ struct Session {
     bool modelLite = false;
     size_t scratchBytes = 0;
     bool preparedColor = false;
+    bool fusedSimdPost = false;
     bool ultraPerformance = false, externalPostCnb = false;
     bool postCnbAlias = false;
     PostCnbScratchLayout scratchLayout = {};
@@ -468,6 +470,10 @@ public:
                 if (skip && name!="pre" && name!="post") continue;
                 if (options.skipSimdPadding && session->modelLite && kind==Kernels::Simd &&
                     options.captureStages.empty() && name.rfind("pad",0)==0) continue;
+                if (name=="post" && session->fusedSimdPost) {
+                    dispatch(enc,m4,*slot,*session,"post",MTLSizeMake(ceil_div(p.alignedUW/2,16),ceil_div(p.alignedUH/2,8),1),b);
+                    continue;
+                }
                 if (name=="post" && session->externalPostCnb && !skip)
                     dispatch_native(enc,m4,*slot,*session,13,view,sizes);
                 const int pass = name.rfind("pass",0) == 0 ? std::atoi(name.c_str()+4) : 0;
@@ -1180,6 +1186,9 @@ private:
         [NSException raise:@"FSR411Binding" format:@"Unknown texture %s",name.c_str()]; return nil;
     }
     BufferBinding bind_buffer(const std::string &stage,const std::string &name,FrameSlot &slot,const Session &s,const Bindings &b) {
+        if(name=="raw" && s.fusedSimdPost) return {slot.constants,kNative+s.native.at(13).offset};
+        if(name=="weights" && s.fusedSimdPost) return {s.nativeWeights,0};
+        if(name=="wh" && s.fusedSimdPost) return {s.halfWeights,0};
         if(name=="ScratchBuffer") return {b.view->scratch,0};
         if(name=="Fsr411Tables") return {s.kernels.at(stage).literalTables,0};
         if(name=="Fsr411LossyConstants") return {slot.constants,kLossy};
