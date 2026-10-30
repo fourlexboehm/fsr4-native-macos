@@ -12,6 +12,8 @@
 #import <stdarg.h>
 #import <string.h>
 #import <unistd.h>
+#import <pthread.h>
+#import <stdlib.h>
 #import "fsr4_live.h"
 
 // A newer hook may be loaded beside an older encoder. Never read a V2-sized
@@ -20,6 +22,8 @@ extern int fsr4_encode_live_frame_v2(const Fsr4LiveFrameV2 *) __attribute__((wea
 extern void fsr4_invalidate_live_owner(void *, void *) __attribute__((weak_import));
 extern void fsr4_release_live_owner(void *, void *) __attribute__((weak_import));
 
+static void hook_log(const char *fmt, ...);
+
 @interface Fsr4OwnerLifetime : NSObject
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, assign) void *owner;
@@ -27,8 +31,10 @@ extern void fsr4_release_live_owner(void *, void *) __attribute__((weak_import))
 
 @implementation Fsr4OwnerLifetime
 - (void)dealloc {
+    hook_log("release owner %p begin", _owner);
     if (fsr4_release_live_owner)
         fsr4_release_live_owner((__bridge void *)_device, _owner);
+    hook_log("release owner %p done", _owner);
 }
 @end
 
@@ -181,11 +187,17 @@ static int fsr4_replace_encode(id scaler, id commandBuffer) {
 }
 
 static void hooked_encode(id self, SEL _cmd, id commandBuffer) {
+    static int traced = 0;
+    const int trace = traced < 4 ? ++traced : 0;
+    if (trace) hook_log("encode #%d enter scaler %p cb %p thread %p", trace, self, commandBuffer, (void *)pthread_self());
     IMP orig = orig_encode(object_getClass(self));
     const char *rep = getenv("FSR4_REPLACE");
     if (rep && rep[0] == '0') fsr4_live_set_inactive("FSR4_REPLACE=0");
-    else if (fsr4_replace_encode(self, commandBuffer))
+    else if (fsr4_replace_encode(self, commandBuffer)) {
+        if (trace) hook_log("encode #%d replaced by FSR4", trace);
         return;
+    }
+    if (trace) hook_log("encode #%d falling back to MetalFX", trace);
     Fsr4OwnerLifetime *lifetime = objc_getAssociatedObject(self, kLifetimeAssoc);
     if (lifetime && fsr4_invalidate_live_owner)
         fsr4_invalidate_live_owner((__bridge void *)lifetime.device, (__bridge void *)self);
@@ -218,6 +230,7 @@ static void install_encode(Class cls) {
 }
 
 static id hooked_new(id self, SEL _cmd, id device) {
+    hook_log("hooked_new: creating scaler on thread %p", (void *)pthread_self());
     id scaler = ((id (*)(id, SEL, id))g_orig_new)(self, _cmd, device);
     if (scaler) {
         remember_flags(scaler, self, device);
@@ -227,6 +240,7 @@ static id hooked_new(id self, SEL _cmd, id device) {
 }
 
 static id hooked_new4(id self, SEL _cmd, id device, id compiler) {
+    hook_log("hooked_new4: creating scaler on thread %p", (void *)pthread_self());
     id scaler = ((id (*)(id, SEL, id, id))g_orig_new4)(self, _cmd, device, compiler);
     if (scaler) {
         remember_flags(scaler, self, device);
@@ -246,7 +260,7 @@ static void swizzle_new(Class cls, SEL sel, IMP repl, IMP *slot) {
 __attribute__((constructor))
 static void fsr4_hook_init(void) {
     @autoreleasepool {
-    hook_log("loaded pid=%d", getpid());
+    hook_log("loaded pid=%d ppid=%d exe=%s", getpid(), getppid(), getprogname());
     Class desc = objc_getClass("MTLFXTemporalScalerDescriptor");
     if (!desc) {
         hook_log("MTLFXTemporalScalerDescriptor missing");
