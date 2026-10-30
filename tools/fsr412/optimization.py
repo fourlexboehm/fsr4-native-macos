@@ -6,7 +6,8 @@ imported model. Transforms reject unknown source shapes instead of guessing.
 from __future__ import annotations
 import re
 
-REVISION = 2
+# 3: POST INT8 dot products in exact float arithmetic.
+REVISION = 3
 
 
 def closing(text, start, left="(", right=")"):
@@ -92,3 +93,21 @@ def pixelization_fix(text: str) -> str:
             f"{indent}float {sx[2]} = (2.0 / (1.0 + exp(-{params}.y))) * fsr412Widen;\n"
             f"{indent}float {sy[1]} = (2.0 / (1.0 + exp(-{params}.z))) * fsr412Widen;\n")
     return text[:sx.start()] + code + text[sy.end():]
+
+
+INT8_DOT = re.compile(r"reduce_add\(int4\(as_type<char4>\((([^()]|\([^()]*\))*)\)\) \* int4\(as_type<char4>\((([^()]|\([^()]*\))*)\)\)\)")
+
+
+def float_int8_dots(text: str) -> str:
+    """Evaluate POST's four-element INT8 dot products with float multiplies.
+
+    Each product is at most 128 * 128 = 2^14 in magnitude and each four-term
+    sum at most 2^16, far inside float's exact integer range (2^24), so
+    int(dot(float4(a), float4(b))) equals the 32-bit integer reduce_add in any
+    evaluation order. Apple GPUs run float FMA at full rate but 32-bit
+    integer multiplies at a fraction of it.
+    """
+    text, count = INT8_DOT.subn(r"int(dot(float4(as_type<char4>(\1)), float4(as_type<char4>(\3))))", text)
+    if count == 0 or re.search(r"int4\(as_type<char4>\([^;]*\* int4\(as_type<char4>", text):
+        raise ValueError("POST INT8 dot products changed")
+    return text

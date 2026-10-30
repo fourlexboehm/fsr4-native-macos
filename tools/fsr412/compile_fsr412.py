@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse, fcntl, hashlib, json, os, re, shutil, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from fsr412.optimization import REVISION, input_color_cache, color_cache_source, pixelization_fix
+from fsr412.optimization import REVISION, input_color_cache, color_cache_source, pixelization_fix, float_int8_dots
 
 ROOT = Path(__file__).resolve().parents[2]
 CATALOG = ROOT / "tools" / "fsr412" / "shader_catalog.json"
@@ -173,6 +173,8 @@ def compile_metal(src: Path, out: Path, entry: str, external: bool = False, tier
         text, formula = input_color_cache(text, 4 if stage == "pre" else 9)
         if stage == "pre":
             (out.parent / "prepare_color.metal").write_text(color_cache_source(text, formula))
+        else:
+            text = float_int8_dots(text)
     if pixel_fix and stage == "post":
         text = pixelization_fix(text)
     generated = out.with_suffix(".metal")
